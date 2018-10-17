@@ -23,6 +23,8 @@
 #include <proto/log.h>
 #include <proto/stream.h>
 
+#include <jsonwrapper.h>
+
 struct flt_ops json_ops;
 
 struct json_config {
@@ -373,6 +375,7 @@ json_tcp_data(struct stream *s, struct filter *filter, struct channel *chn)
 
 	left = ci_contig_data(chn);
 
+#if 0 
 	/* scan for a newline record delimeter */
 	ret = 0;
 	start = ci_head(chn) + FLT_NXT(filter, chn);
@@ -391,6 +394,37 @@ json_tcp_data(struct stream *s, struct filter *filter, struct channel *chn)
 				ret = left+i+1;
 				//break; /* allow one record at a time through */
 			}
+		}
+	}
+#endif
+
+	/* handle wrapped buffer */
+	char* parse_start = ci_head(chn) + FLT_NXT(filter, chn);
+	char* origin =  c_orig(chn);
+	char* buffer_end = start + left + 1;
+	char* parsed_til;
+	char* parse_end;
+	if(unlikely(left < avail)){
+		parse_end = c_orig(chn) + (avail-left);
+		//guaranteed to be non zero because of above
+	} else {
+		parse_end = c_orig(chn) + (left);
+	}
+
+	int parsed_records = 0;
+	int failed_records = 0;
+	while(parse_start != parse_end){
+		json_passed_t r = json_parse_wrap(origin, parse_start, parse_end, buffer_end, &parsed_til);
+		if(r == JSON_PASS){
+			//move up the pointer because we successfully parsed a record
+			ret += (parsed_til - parse_start);
+			printf("ret += %d\n", (parsed_til - parse_start));
+			parse_start = parsed_til;
+			parsed_records++;
+		} else {
+			failed_records++;
+			/* on a failed record, we don't move the ret up, we have to reparse */
+			break;
 		}
 	}
 

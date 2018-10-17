@@ -248,7 +248,7 @@ CFLAGS = $(ARCH_FLAGS) $(CPU_CFLAGS) $(DEBUG_CFLAGS) $(SPEC_CFLAGS)
 # These LDFLAGS are used as the first "ld" options, regardless of any library
 # path or any other option. They may be changed to add any linker-specific
 # option at the beginning of the ld command line.
-LDFLAGS = $(ARCH_FLAGS) -g
+LDFLAGS = $(ARCH_FLAGS) -g -lc++
 
 #### Target system options
 # Depending on the target platform, some options are set, as well as some
@@ -823,7 +823,7 @@ EBTREE_DIR := ebtree
 
 #### Global compile options
 VERBOSE_CFLAGS = $(CFLAGS) $(TARGET_CFLAGS) $(SMALL_OPTS) $(DEFINE)
-COPTS  = -Iinclude -I$(EBTREE_DIR) -Wall -Wextra
+COPTS  = -Iinclude -I$(EBTREE_DIR) -Wall -Wextra -Ijson
 COPTS += $(CFLAGS) $(TARGET_CFLAGS) $(SMALL_OPTS) $(DEFINE) $(SILENT_DEFINE)
 COPTS += $(DEBUG) $(OPTIONS_CFLAGS) $(ADDINC)
 
@@ -895,7 +895,7 @@ OBJS = src/proto_http.o src/cfgparse.o src/server.o src/stream.o        \
        src/protocol.o src/lru.o src/hdr_idx.o src/hpack-huff.o          \
        src/mailers.o src/h2.o src/base64.o src/hash.o src/http.o	\
        src/http_acl.o src/http_fetch.o src/http_conv.o src/http_act.o   \
-       src/http_rules.o src/proto_sockpair.o src/flt_json.o
+       src/http_rules.o src/proto_sockpair.o src/flt_json.o json/jsonwrapper.o
 
 EBTREE_OBJS = $(EBTREE_DIR)/ebtree.o $(EBTREE_DIR)/eb32sctree.o \
               $(EBTREE_DIR)/eb32tree.o $(EBTREE_DIR)/eb64tree.o \
@@ -945,6 +945,9 @@ src/haproxy.o:	src/haproxy.c $(DEP)
 src/dlmalloc.o: $(DLMALLOC_SRC) $(DEP)
 	$(CC) $(COPTS) -DDEFAULT_MMAP_THRESHOLD=$(DLMALLOC_THRES) -c -o $@ $<
 
+json/jsonwrapper.o: json/jsonwrapper.h json/jsonwrapper.cpp
+	make -C json/ COPTS="$(COPTS)" jsonwrapper.o
+
 install-man:
 	install -d "$(DESTDIR)$(MANDIR)"/man1
 	install -m 644 doc/haproxy.1 "$(DESTDIR)$(MANDIR)"/man1
@@ -983,6 +986,7 @@ clean:
 	for dir in . src include/* doc ebtree; do rm -f $$dir/*~ $$dir/*.rej $$dir/core; done
 	rm -f haproxy-$(VERSION).tar.gz haproxy-$(VERSION)$(SUBVERS).tar.gz
 	rm -f haproxy-$(VERSION) haproxy-$(VERSION)$(SUBVERS) nohup.out gmon.out
+	make -C json/ clean
 
 tags:
 	find src include \( -name '*.c' -o -name '*.h' \) -print0 | \
