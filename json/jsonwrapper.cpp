@@ -5,8 +5,8 @@
 #include "rapidjson/stream.h"
 using namespace rapidjson;
 
-//#define DEBUG 1
-//#define WMS_TRACE 1
+#define DEBUG 1
+#define WMS_TRACE 1
 
 struct WrappedMemoryStream {
     typedef char Ch; // byte
@@ -17,44 +17,74 @@ struct WrappedMemoryStream {
 		, parse_start_(parse_start)
 		, parse_end_(parse_end)
 		, buffer_end_(buffer_end) 
-	{}
+		, parse_original_start_(parse_start_)
+		, count_(0)
+		, next_char_(*parse_start)
+	{
+		if(parse_end_ > parse_start_){
+			/* unwrapped */
+			size_ = parse_end_ - parse_start_;
+		} else {
+			/* wrapped */
+			size_ = (buffer_end_ - parse_start_) + (parse_end_ - origin_);
+		}
+	}
 
 	Ch Peek() const { 
 		//return RAPIDJSON_UNLIKELY(parse_start_ == parse_end_) ? '\0' : *parse_start_;
 #ifdef WMS_TRACE
-		printf("ms peek: %c\n", *parse_start_);
+		//printf("ms peek: %c\n", *parse_start_);
 #endif
-		return *parse_start_;
+		return next_char_;
 	}
     Ch Take() { 
 		//previous increment may have wrapped
 		if( RAPIDJSON_UNLIKELY(parse_start_ == parse_end_) ){
-			/* not sure about this.. */
 #ifdef WMS_TRACE
-			printf("ms take (eof): %c\n", *parse_start_);
+			//printf("ms take (eof): %c\n", next_char_);
 #endif
-			return *parse_start_;
+			char ret = next_char_;
+			if(next_char_ != '\0'){
+				next_char_ = '\0';
+			}
+			return ret;
 		} else {
-			Ch ret = *(parse_start_++);
-			//increment may have wrapped
-			//printf("ms take: %c\n", ret);
-			if( RAPIDJSON_UNLIKELY(parse_start_ == buffer_end_)){
+			Ch ret = next_char_;
 #ifdef WMS_TRACE
-				printf("Wrapping buffer");
+			//printf("ms take: %c\n", ret);
 #endif
+			parse_start_++;
+			count_++;
+			//increment may have wrapped
+			if( RAPIDJSON_UNLIKELY(parse_start_ != parse_end_ && parse_start_ == buffer_end_)){
+//#ifdef WMS_TRACE
+				printf("Wrapping buffer\n");
+//#endif
 				parse_start_ = origin_;
 			}
+			next_char_ = *parse_start_;
 			return ret;
 		}
 	}
     size_t Tell() const { 
+		return count_;
+		/* give the number of bytes read */
 		if(parse_start_ <= parse_end_){
-			//size after wrapping:
-			return static_cast<size_t>(parse_end_ - parse_start_);
-		} else {
-			//size before wrapping:
-			return static_cast<size_t>( (buffer_end_ - parse_start_) + (parse_end_ - origin_) );
+			/* parse_start is before parse_end, so contiguous */
+			size_t count = parse_start_ - origin_;
+			/* check if we wrapped earlier */
+			if( RAPIDJSON_UNLIKELY(parse_original_start_ > parse_end_)) {
+				// yes
+				count += (buffer_end_ - parse_original_start_);
+			}
+			return count;
 		}
+
+		/* assert parse_start_ > parse_end_ 
+		 * buffer is not contiguous but we haven't wrapped yet, so this is
+		 * simple */
+		size_t count = (parse_start_ - parse_original_start_);
+		return count;
 	}
 
     Ch* PutBegin() { RAPIDJSON_ASSERT(false); return 0; }
@@ -64,7 +94,11 @@ struct WrappedMemoryStream {
 
     // For encoding detection only.
     const Ch* Peek4() const {
-		return Tell() >= 4 ? parse_start_ : 0; 
+		if(count_+4 <= size_){
+			return parse_start_;
+		} else {
+			return 0;
+		}
     }
 	
 	/* if the buffer wraps:
@@ -74,9 +108,12 @@ struct WrappedMemoryStream {
 	*/
     const Ch* origin_;		//!< Start of the buffer (point to go to after wrap)
     const Ch* parse_start_;	//!< Current read position.
+    const Ch* parse_original_start_;	//!< Current read position.
     const Ch* parse_end_;	//!< End of stream  should be: (origin+size) or a pointer to the byte after the end
 	const Ch* buffer_end_;	//!< End of buffer
+	Ch next_char_; //!< Used to return the next char (or \0 if reached eof)
     size_t size_;       //!< Size of the stream.
+    size_t count_;       //!< Size of the stream.
 };
 //! Specialized for UTF8 WrappedMemoryStream.
 template <>
@@ -117,6 +154,12 @@ json_passed_t json_parse_wrap(char* origin, char* parse_start, char* parse_end, 
 	WrappedMemoryStream ms(origin, parse_start, parse_end, buffer_end);
 	EncodedInputStream<UTF8<char>, WrappedMemoryStream> is(ms);
 
+	printf("json_parse_wrap: origin: %p (%d)  parse_start: %p (%d) parse_end: %p (%d) buffer_end: %p (%d) parsed_til: %p\n",
+			origin, *origin,
+			parse_start, *parse_start,
+			parse_end, *parse_end,
+			buffer_end, *buffer_end,
+			parsed_til);
 	d.ParseStream<kParseStopWhenDoneFlag>(is);
 
     if (d.HasParseError()) {
@@ -124,14 +167,32 @@ json_passed_t json_parse_wrap(char* origin, char* parse_start, char* parse_end, 
         fprintf(stderr, "\nError(offset %u): %s\n",
                 (unsigned)d.GetErrorOffset(),
                 GetParseError_En(d.GetParseError()));
-		char* offset = &parse_start[d.GetErrorOffset()];
-		fprintf(stderr, "offset[-2] %c offset[-1]: %c offset[0]: %c offset[1]: %c offset[2]: %c\n",
-			offset[-2],
-			offset[-1],
-			offset[0],
-			offset[1],
-			offset[2]
-		);
+		int offset = d.GetErrorOffset();
+		int offset_len;
+
+		WrappedMemoryStream error_ms(origin, parse_start, parse_end, buffer_end);
+		EncodedInputStream<UTF8<char>, WrappedMemoryStream> error_is(error_ms);
+
+		int print_len = offset+10;
+		printf("print len: %d\n", print_len);
+		printf("parse_start: ");
+		for(int i=0; i<print_len; i++){
+			char c = error_is.Peek();
+			if(c == '\n'){
+				c = '?';
+			}
+			error_is.Take();
+			if(i == offset){
+				printf("\x1b[31m" "%c" "\x1b[0m", c);
+			} else {
+				printf("%c", c);
+			}
+		}
+		printf("\noffset_____: ");
+		for(int i=0; i<offset; i++){
+			printf(" ");
+		}
+		printf("^\n");
 #endif
 		return JSON_FAIL;
 	}
@@ -181,8 +242,8 @@ void test_wrapped_string(int argc, char* argv[]){
 	char* parse_start = &test_string[11];
 	char* buffer_end = &test_string[strlen(test_string)];
 	char* parse_end = &test_string[10];
-	printf("strlen: %lu\n", strlen(test_string));
-	printf("origin: %p parse_start: %p, buffer_end: %p, parse_end: %p\n", origin, parse_start, buffer_end, parse_end);
+	//printf("strlen: %lu\n", strlen(test_string));
+	//printf("origin: %p parse_start: %p, buffer_end: %p, parse_end: %p\n", origin, parse_start, buffer_end, parse_end);
 
 	printf("** testing WrappedMemoryStream\n");
 	WrappedMemoryStream ms(origin, parse_start, parse_end, buffer_end);
@@ -197,12 +258,13 @@ void test_wrapped_string(int argc, char* argv[]){
 	}
 	printf("FINAL Tell: %lu Peek: %c Take: %c\n", ms.Tell(), ms.Peek(), ms.Take());
 
+	printf("** testing full parser, third iteration should fail\n");
 	int r = 1;
 	printf("parse_end: %p\n", parse_end);
 	while(r && parse_start != parse_end){
 		printf("start: %p start[0]: %c\n", parse_start, parse_start[0]);
 		r = json_parse_wrap(origin, parse_start, parse_end, buffer_end, &parse_start);
-		/* third should fail */
+		/* third iteration should fail */
 		if(r == JSON_FAIL){
 			printf("parse failed\n");
 			break;
@@ -213,7 +275,7 @@ void test_wrapped_string(int argc, char* argv[]){
 	printf("eof! start: %p start[0]: %c\n", parse_start, parse_start[0]);
 
 	char* test_unwrapped_string = "{\"craig\":\"tests\"}\n{\"hello\":\"world\"}";
-	printf("** testing unwrapped string starting at: %p\n", test_unwrapped_string);
+	printf("** testing unwrapped string starting at: %p, two records should succeed\n", test_unwrapped_string);
 	origin = test_unwrapped_string;
 	parse_start = test_unwrapped_string;
 	buffer_end = &test_unwrapped_string[strlen(test_unwrapped_string)];

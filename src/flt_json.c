@@ -364,18 +364,23 @@ json_chn_end_analyze(struct stream *s, struct filter *filter,
 static int
 json_tcp_data(struct stream *s, struct filter *filter, struct channel *chn)
 {
+	struct json_config *conf = FLT_CONF(filter);
 	int                  avail = ci_data(chn) - FLT_NXT(filter, chn);
 	int                  ret  = avail;
 	int left;
-	char *start;
 
 	if(avail == 0){
 		return 0;
 	}
 
 	left = ci_contig_data(chn);
+	STRM_TRACE(conf, s, "%-25s: START channel=%-10s - mode=%-5s (%s) - next=%u - avail=%u",
+		   __FUNCTION__,
+		   channel_label(chn), proxy_mode(s), stream_pos(s),
+		   FLT_NXT(filter, chn), avail);
 
 #if 0 
+	char *start;
 	/* scan for a newline record delimeter */
 	ret = 0;
 	start = ci_head(chn) + FLT_NXT(filter, chn);
@@ -401,37 +406,55 @@ json_tcp_data(struct stream *s, struct filter *filter, struct channel *chn)
 	/* handle wrapped buffer */
 	char* parse_start = ci_head(chn) + FLT_NXT(filter, chn);
 	char* origin =  c_orig(chn);
-	char* buffer_end = start + left + 1;
+	char* buffer_end = parse_start + left;  //the first byte after the last valid byte in the buffer
+	char* parse_end; //should be the last character to parse
 	char* parsed_til;
-	char* parse_end;
 	if(unlikely(left < avail)){
-		parse_end = c_orig(chn) + (avail-left);
+		parse_end = c_orig(chn) + (avail-left) - 1;
+		printf("wrapped parse end: %p \n", parse_end);
 		//guaranteed to be non zero because of above
 	} else {
-		parse_end = c_orig(chn) + (left);
+		/*parse_end = c_orig(chn) + (left) - 1;*/
+		parse_end = parse_start + (left) - 1;
+		printf("unwrapped parse end: %p \n", parse_end);
 	}
 
 	int parsed_records = 0;
 	int failed_records = 0;
+	ret = 0;
 	while(parse_start != parse_end){
+		printf("parsing json\n");
 		json_passed_t r = json_parse_wrap(origin, parse_start, parse_end, buffer_end, &parsed_til);
 		if(r == JSON_PASS){
 			//move up the pointer because we successfully parsed a record
-			ret += (parsed_til - parse_start);
-			printf("ret += %d\n", (parsed_til - parse_start));
+			int change;
+			if(unlikely( parsed_til < parse_start )){
+				/* wrapped */
+				change = (buffer_end - parse_start) + (parsed_til - origin);
+			} else {
+				change = (parsed_til - parse_start); 
+			}
+			ret += change;
+			printf("success, ret += %ld\n", (change));
 			parse_start = parsed_til;
 			parsed_records++;
 		} else {
+			printf("json parse failed at: %p\n", parsed_til);
 			failed_records++;
 			/* on a failed record, we don't move the ret up, we have to reparse */
 			break;
 		}
 	}
+	/* forward through remaining whitespace */
+	/*while(ret < left && *parse_start == '\n'){*/
+		/*parse_start++;*/
+		/*ret++;*/
+	/*}*/
 
-	/*STRM_TRACE(conf, s, "%-25s: channel=%-10s - mode=%-5s (%s) - next=%u - avail=%u - consume=%d",*/
-		   /*__FUNCTION__,*/
-		   /*channel_label(chn), proxy_mode(s), stream_pos(s),*/
-		   /*FLT_NXT(filter, chn), avail, ret);*/
+	STRM_TRACE(conf, s, "%-25s: DONE channel=%-10s - mode=%-5s (%s) - next=%u - avail=%u - consume=%d",
+		   __FUNCTION__,
+		   channel_label(chn), proxy_mode(s), stream_pos(s),
+		   FLT_NXT(filter, chn), avail, ret);
 
 	if (ret != avail)
 		task_wakeup(s->task, TASK_WOKEN_MSG);
