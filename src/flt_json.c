@@ -32,6 +32,8 @@ struct json_config {
 	char         *name;
 	int           noop;
 	int           one_record_per_parse;
+	int stats_records_parsed;
+	int stats_records_failed;
 };
 
 #define TRACE(conf, fmt, ...)						\
@@ -46,6 +48,16 @@ struct json_config {
 		(strm ? strm->req.analysers : 0), (strm ? strm->res.analysers : 0),	\
 		##__VA_ARGS__)
 
+/* define FILTER_TRACE to get a log of the outcome of each filter call */
+/*#define FILTER_TRACE 1*/
+
+/* define JSON_PARSE_TRACE to get a deeper view of parsing behaviour */
+#ifdef JSON_PARSE_TRACE
+#define JSON_PARSE_TRACE(fmt, ...) \
+			printf(fmt, ##__VA_ARGS__)
+#else
+#define JSON_PARSE_TRACE(fmt, ...)
+#endif
 
 static const char *
 channel_label(const struct channel *chn)
@@ -200,8 +212,8 @@ json_detach(struct stream *s, struct filter *filter)
 {
 	struct json_config *conf = FLT_CONF(filter);
 
-	STRM_TRACE(conf, s, "%-25s: filter-type=%s",
-		   __FUNCTION__, filter_type(filter));
+	STRM_TRACE(conf, s, "%-25s: filter-type=%s records_parsed=%d records_failed=%d",
+		   __FUNCTION__, filter_type(filter), conf->stats_records_parsed, conf->stats_records_failed);
 }
 
 /* Called when a stream is created */
@@ -263,7 +275,10 @@ json_chn_start_analyze(struct stream *s, struct filter *filter,
 		   channel_label(chn), proxy_mode(s), stream_pos(s));
 	filter->pre_analyzers  |= (AN_REQ_ALL | AN_RES_ALL);
 	filter->post_analyzers |= (AN_REQ_ALL | AN_RES_ALL);
-	register_data_filter(s, chn, filter);
+	/* only register filter on request channel (incoming) */ 
+	if( !(chn->flags & CF_ISRESP) ){
+		register_data_filter(s, chn, filter);
+	}
 	return 1;
 }
 
@@ -374,10 +389,10 @@ json_tcp_data(struct stream *s, struct filter *filter, struct channel *chn)
 	}
 
 	left = ci_contig_data(chn);
-	STRM_TRACE(conf, s, "%-25s: START channel=%-10s - mode=%-5s (%s) - next=%u - avail=%u",
-		   __FUNCTION__,
-		   channel_label(chn), proxy_mode(s), stream_pos(s),
-		   FLT_NXT(filter, chn), avail);
+	/*STRM_TRACE(conf, s, "%-25s: START channel=%-10s - mode=%-5s (%s) - next=%u - avail=%u",*/
+		   /*__FUNCTION__,*/
+		   /*channel_label(chn), proxy_mode(s), stream_pos(s),*/
+		   /*FLT_NXT(filter, chn), avail);*/
 
 #if 0 
 	char *start;
@@ -411,19 +426,18 @@ json_tcp_data(struct stream *s, struct filter *filter, struct channel *chn)
 	char* parsed_til;
 	if(unlikely(left < avail)){
 		parse_end = c_orig(chn) + (avail-left) - 1;
-		printf("wrapped parse end: %p \n", parse_end);
+		JSON_PARSE_TRACE("wrapped parse end: %p \n", parse_end);
 		//guaranteed to be non zero because of above
 	} else {
-		/*parse_end = c_orig(chn) + (left) - 1;*/
 		parse_end = parse_start + (left) - 1;
-		printf("unwrapped parse end: %p \n", parse_end);
+		JSON_PARSE_TRACE("unwrapped parse end: %p \n", parse_end);
 	}
 
 	int parsed_records = 0;
 	int failed_records = 0;
 	ret = 0;
 	while(parse_start != parse_end){
-		printf("parsing json\n");
+		JSON_PARSE_TRACE("parsing json\n");
 		json_passed_t r = json_parse_wrap(origin, parse_start, parse_end, buffer_end, &parsed_til);
 		if(r == JSON_PASS){
 			//move up the pointer because we successfully parsed a record
@@ -435,26 +449,38 @@ json_tcp_data(struct stream *s, struct filter *filter, struct channel *chn)
 				change = (parsed_til - parse_start); 
 			}
 			ret += change;
-			printf("success, ret += %ld\n", (change));
+			JSON_PARSE_TRACE("success, ret += %ld\n", (change));
+			JSON_PARSE_TRACE("parsed_til: %p (%d)\n", parsed_til, *parsed_til);
 			parse_start = parsed_til;
 			parsed_records++;
 		} else {
-			printf("json parse failed at: %p\n", parsed_til);
+			JSON_PARSE_TRACE("json parse failed at: %p\n", parsed_til);
 			failed_records++;
 			/* on a failed record, we don't move the ret up, we have to reparse */
 			break;
 		}
 	}
-	/* forward through remaining whitespace */
+	if(unlikely(parsed_til == parse_end)){
+		/* in the unlikely case we parsed the entire buffer, parsed_til points
+		 * at the final byte parsed */
+		JSON_PARSE_TRACE("parsed entire buffer, ret +=1\n");
+		ret += 1;
+	}
+	/* forward through remaining whitespace, TODO support wrapping */
 	/*while(ret < left && *parse_start == '\n'){*/
 		/*parse_start++;*/
 		/*ret++;*/
 	/*}*/
 
-	STRM_TRACE(conf, s, "%-25s: DONE channel=%-10s - mode=%-5s (%s) - next=%u - avail=%u - consume=%d",
+#ifdef FILTER_TRACE
+	STRM_TRACE(conf, s, "%-25s: channel=%-10s - mode=%-5s (%s) - next=%u - avail=%u - consume=%d - records_parsed=%d - records_failed=%d",
 		   __FUNCTION__,
 		   channel_label(chn), proxy_mode(s), stream_pos(s),
-		   FLT_NXT(filter, chn), avail, ret);
+		   FLT_NXT(filter, chn), avail, ret,
+		   parsed_records, failed_records);
+#endif
+	conf->stats_records_parsed += parsed_records;
+	conf->stats_records_failed += failed_records;
 
 	if (ret != avail)
 		task_wakeup(s->task, TASK_WOKEN_MSG);
@@ -584,6 +610,8 @@ parse_json_flt(char **args, int *cur_arg, struct proxy *px,
 		return -1;
 	}
 	conf->proxy = px;
+	conf->stats_records_parsed = 0;
+	conf->stats_records_failed = 0;
 
 	if (!strcmp(args[pos], "json")) {
 		pos++;

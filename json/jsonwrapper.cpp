@@ -5,8 +5,8 @@
 #include "rapidjson/stream.h"
 using namespace rapidjson;
 
-#define DEBUG 1
-#define WMS_TRACE 1
+//#define DEBUG 1
+//#define WMS_TRACE 1
 
 struct WrappedMemoryStream {
     typedef char Ch; // byte
@@ -33,7 +33,7 @@ struct WrappedMemoryStream {
 	Ch Peek() const { 
 		//return RAPIDJSON_UNLIKELY(parse_start_ == parse_end_) ? '\0' : *parse_start_;
 #ifdef WMS_TRACE
-		//printf("ms peek: %c\n", *parse_start_);
+		printf("ms peek: %c\n", *parse_start_);
 #endif
 		return next_char_;
 	}
@@ -41,7 +41,7 @@ struct WrappedMemoryStream {
 		//previous increment may have wrapped
 		if( RAPIDJSON_UNLIKELY(parse_start_ == parse_end_) ){
 #ifdef WMS_TRACE
-			//printf("ms take (eof): %c\n", next_char_);
+			printf("ms take (eof): %c\n", next_char_);
 #endif
 			char ret = next_char_;
 			if(next_char_ != '\0'){
@@ -51,15 +51,15 @@ struct WrappedMemoryStream {
 		} else {
 			Ch ret = next_char_;
 #ifdef WMS_TRACE
-			//printf("ms take: %c\n", ret);
+			printf("ms take: %c\n", ret);
 #endif
 			parse_start_++;
 			count_++;
 			//increment may have wrapped
 			if( RAPIDJSON_UNLIKELY(parse_start_ != parse_end_ && parse_start_ == buffer_end_)){
-//#ifdef WMS_TRACE
+#ifdef WMS_TRACE
 				printf("Wrapping buffer\n");
-//#endif
+#endif
 				parse_start_ = origin_;
 			}
 			next_char_ = *parse_start_;
@@ -154,12 +154,14 @@ json_passed_t json_parse_wrap(char* origin, char* parse_start, char* parse_end, 
 	WrappedMemoryStream ms(origin, parse_start, parse_end, buffer_end);
 	EncodedInputStream<UTF8<char>, WrappedMemoryStream> is(ms);
 
+#ifdef DEBUG
 	printf("json_parse_wrap: origin: %p (%d)  parse_start: %p (%d) parse_end: %p (%d) buffer_end: %p (%d) parsed_til: %p\n",
 			origin, *origin,
 			parse_start, *parse_start,
 			parse_end, *parse_end,
 			buffer_end, *buffer_end,
 			parsed_til);
+#endif
 	d.ParseStream<kParseStopWhenDoneFlag>(is);
 
     if (d.HasParseError()) {
@@ -196,7 +198,7 @@ json_passed_t json_parse_wrap(char* origin, char* parse_start, char* parse_end, 
 #endif
 		return JSON_FAIL;
 	}
-	/* set parse_start to final position */
+	/* set parse_start to final position: the next unparsed byte */
 	if(parsed_til){
 		*parsed_til = (char*) (ms.parse_start_); 
 	}
