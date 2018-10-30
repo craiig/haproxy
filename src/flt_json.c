@@ -27,11 +27,23 @@
 
 struct flt_ops json_ops;
 
+enum json_version {
+	JSON_PARSER
+	, JSON_NOOP
+	, JSON_NEWLINE
+	, JSON_NEWLINE_STRSTR
+};
+char* json_version_str[] = {
+	"full json parser (rapidjson)"
+	, "noop"
+	, "newline"
+	, "newline with strstr"
+};
+
 struct json_config {
 	struct proxy *proxy;
 	char         *name;
-	int           noop;
-	int           one_record_per_parse;
+	enum json_version version;
 	int stats_records_parsed;
 	int stats_records_failed;
 };
@@ -52,7 +64,8 @@ struct json_config {
 /*#define FILTER_TRACE 1*/
 
 /* define JSON_PARSE_TRACE to get a deeper view of parsing behaviour */
-#ifdef JSON_PARSE_TRACE
+/*#define PARSE_TRACING 1*/
+#ifdef PARSE_TRACING
 #define JSON_PARSE_TRACE(fmt, ...) \
 			printf(fmt, ##__VA_ARGS__)
 #else
@@ -137,9 +150,8 @@ json_init(struct proxy *px, struct flt_conf *fconf)
 	else
 		memprintf(&conf->name, "TRACE/%s", px->id);
 	fconf->conf = conf;
-	TRACE(conf, "filter initialized [noop=%s - one-record-per-parse=%s]",
-	      (conf->noop ? "true" : "false"),
-	      (conf->one_record_per_parse ? "true" : "false")
+	TRACE(conf, "filter initialized [version=%s]",
+	      (json_version_str[conf->version])
 	);
 	return 0;
 }
@@ -377,7 +389,7 @@ json_chn_end_analyze(struct stream *s, struct filter *filter,
  * Hooks to filter TCP data
  *************************************************************************/
 static int
-json_tcp_data(struct stream *s, struct filter *filter, struct channel *chn)
+json_tcp_data_parser(struct stream *s, struct filter *filter, struct channel *chn)
 {
 	struct json_config *conf = FLT_CONF(filter);
 	int                  avail = ci_data(chn) - FLT_NXT(filter, chn);
@@ -393,30 +405,6 @@ json_tcp_data(struct stream *s, struct filter *filter, struct channel *chn)
 		   /*__FUNCTION__,*/
 		   /*channel_label(chn), proxy_mode(s), stream_pos(s),*/
 		   /*FLT_NXT(filter, chn), avail);*/
-
-#if 0 
-	char *start;
-	/* scan for a newline record delimeter */
-	ret = 0;
-	start = ci_head(chn) + FLT_NXT(filter, chn);
-	for(int i = 0; i<left; i++){
-		if(start[i] == '\n'){
-			ret = i+1;
-			//break; /* allow one record at a time through */
-		}
-	}
-
-	if(unlikely(left < avail)){
-		/* more data than is contiguous, so wrap and and continue scanning */
-		start = c_orig(chn);
-		for(int i = 0; i<(avail-left); i++){
-			if(start[i] == '\n'){
-				ret = left+i+1;
-				//break; /* allow one record at a time through */
-			}
-		}
-	}
-#endif
 
 	/* handle wrapped buffer */
 	char* parse_start = ci_head(chn) + FLT_NXT(filter, chn);
@@ -486,28 +474,35 @@ json_tcp_data(struct stream *s, struct filter *filter, struct channel *chn)
 		task_wakeup(s->task, TASK_WOKEN_MSG);
 	return ret;
 }
+
 static int
-json_tcp_data_orpp(struct stream *s, struct filter *filter, struct channel *chn)
+json_tcp_data_newline(struct stream *s, struct filter *filter, struct channel *chn)
 {
-	/*struct json_config *conf = FLT_CONF(filter);*/
+	struct json_config *conf = FLT_CONF(filter);
 	int                  avail = ci_data(chn) - FLT_NXT(filter, chn);
 	int                  ret  = avail;
 	int left;
-	char *start;
 
 	if(avail == 0){
 		return 0;
 	}
 
 	left = ci_contig_data(chn);
+	/*STRM_TRACE(conf, s, "%-25s: channel=%-10s - mode=%-5s (%s) - next=%u - avail=%u",*/
+		   /*__FUNCTION__,*/
+		   /*channel_label(chn), proxy_mode(s), stream_pos(s),*/
+		   /*FLT_NXT(filter, chn), avail);*/
 
+	char *start;
+	int parsed_records = 0;
 	/* scan for a newline record delimeter */
 	ret = 0;
 	start = ci_head(chn) + FLT_NXT(filter, chn);
 	for(int i = 0; i<left; i++){
 		if(start[i] == '\n'){
 			ret = i+1;
-			break; /* allow one record at a time through */
+			parsed_records++;
+			//break; /* allow one record at a time through */
 		}
 	}
 
@@ -517,15 +512,118 @@ json_tcp_data_orpp(struct stream *s, struct filter *filter, struct channel *chn)
 		for(int i = 0; i<(avail-left); i++){
 			if(start[i] == '\n'){
 				ret = left+i+1;
-				break; /* allow one record at a time through */
+				parsed_records++;
+				//break; /* allow one record at a time through */
 			}
 		}
 	}
+	conf->stats_records_parsed += parsed_records;
 
-	/*STRM_TRACE(conf, s, "%-25s: channel=%-10s - mode=%-5s (%s) - next=%u - avail=%u - consume=%d",*/
-		   /*__FUNCTION__,*/
-		   /*channel_label(chn), proxy_mode(s), stream_pos(s),*/
-		   /*FLT_NXT(filter, chn), avail, ret);*/
+	if (ret != avail)
+		task_wakeup(s->task, TASK_WOKEN_MSG);
+	return ret;
+}
+static int
+json_tcp_data_newline_strstr(struct stream *s, struct filter *filter, struct channel *chn)
+{
+	/* scan for a newline record delimeter using strstr */
+	struct json_config *conf = FLT_CONF(filter);
+	int                  avail = ci_data(chn) - FLT_NXT(filter, chn);
+	int                  ret  = avail;
+	int left;
+
+	if(avail == 0){
+		return 0;
+	}
+
+#ifdef FILTER_TRACE
+	STRM_TRACE(conf, s, "%-25s: START channel=%-10s - mode=%-5s (%s) - next=%u - avail=%u",
+		   __FUNCTION__,
+		   channel_label(chn), proxy_mode(s), stream_pos(s),
+		   FLT_NXT(filter, chn), avail);
+#endif
+
+	char *start, *end;
+	int parsed_records = 0;
+	ret = 0;
+
+	/* first from the start of the data in the buffer */
+	start = ci_head(chn) + FLT_NXT(filter, chn);
+	left = ci_contig_data(chn);
+	end = start + left;
+	JSON_PARSE_TRACE("newline search: start= %p (%d), end= %p (%d) \n", start, *start, end, *end);
+
+	while(start < end){
+		JSON_PARSE_TRACE("strnstrn(start=%p(%d), ..., left=%d)\n", start, *start, left);
+		char* strstr_ret = strnstr(start, "\n", left);
+		if(strstr_ret != NULL){
+			/* found occurrence */
+			strstr_ret += 1; //move up to the next byte to look at, helps with math below
+			size_t change = (strstr_ret-start);
+			JSON_PARSE_TRACE("found occurrence at: %p (%d)\n", strstr_ret, *strstr_ret);
+
+			JSON_PARSE_TRACE("ret += %d\n", change);
+			ret += change;
+			parsed_records ++;
+
+			/* reduce left and move start up */
+			left -= (strstr_ret - start);
+			start = strstr_ret; /* if this goes past end it never gets dereferenced */
+		} else {
+			break;
+		}
+	}
+	/* check wrap remainder */
+	int wrap_remainder = end-start;
+	JSON_PARSE_TRACE("wrap remainder: %d\n", wrap_remainder);
+
+	if(unlikely(ci_contig_data(chn) < avail)){
+		/* more data than is contiguous, so wrap and and continue scanning */
+		start = c_orig(chn);
+		left = avail - ci_contig_data(chn);
+		end = start + left;
+		JSON_PARSE_TRACE("newline search wrapped: start= %p (%d), end= %p (%d), left=%d \n", start, *start, end, *end, left);
+
+		while(start != end){
+			JSON_PARSE_TRACE("strnstrn(start=%p(%d), ..., left=%d)\n", start, *start, left);
+			char* strstr_ret = strnstr(start, "\n", left);
+			if(strstr_ret != NULL){
+				/* found occurrence */
+				strstr_ret += 1; //move up to the next byte to look at, helps with math below
+				size_t change = (strstr_ret-start);
+				JSON_PARSE_TRACE("found occurrence at: %p (%d)\n", strstr_ret, *strstr_ret);
+
+				if(unlikely(wrap_remainder)>0){
+					change += wrap_remainder;
+					wrap_remainder = 0;
+				}
+				JSON_PARSE_TRACE("ret += %lu\n", change);
+				ret += change;
+				parsed_records ++;
+
+				/* reduce left and move start up */
+				left -= (strstr_ret - start);
+				start = strstr_ret; /* if this goes past end it never gets dereferenced */
+			} else {
+				break;
+			}
+		}
+		/*for(int i = 0; i<(avail-left); i++){*/
+			/*if(start[i] == '\n'){*/
+				/*ret = left+i+1;*/
+				/*parsed_records++;*/
+				/*//break; [> allow one record at a time through <]*/
+			/*}*/
+		/*}*/
+	}
+	conf->stats_records_parsed += parsed_records;
+
+#ifdef FILTER_TRACE
+	STRM_TRACE(conf, s, "%-25s: DONE channel=%-10s - mode=%-5s (%s) - next=%u - avail=%u - ret=%d",
+		   __FUNCTION__,
+		   channel_label(chn), proxy_mode(s), stream_pos(s),
+		   FLT_NXT(filter, chn), avail, ret);
+#endif
 
 	if (ret != avail)
 		task_wakeup(s->task, TASK_WOKEN_MSG);
@@ -592,7 +690,7 @@ struct flt_ops json_ops = {
 	.channel_end_analyze   = json_chn_end_analyze,
 
 	/* Filter TCP data */
-	.tcp_data         = json_tcp_data,
+	.tcp_data         = json_tcp_data_parser,
 	.tcp_forward_data = json_tcp_forward_data,
 };
 
@@ -630,21 +728,28 @@ parse_json_flt(char **args, int *cur_arg, struct proxy *px,
 				}
 				pos++;
 			}
-			else if (!strcmp(args[pos], "noop"))
-				conf->noop = 1;
-			else if (!strcmp(args[pos], "record-per-parse"))
-				conf->one_record_per_parse = 1;
-			else
+			else if (!strcmp(args[pos], "noop")){
+				conf->version = JSON_NOOP;
+			} else if (!strcmp(args[pos], "newline")) {
+				conf->version = JSON_NEWLINE;
+			} else if (!strcmp(args[pos], "newlinestrstr")) {
+				conf->version = JSON_NEWLINE_STRSTR;
+			} else {
 				break;
+			}
 			pos++;
 		}
 		*cur_arg = pos;
 
-		if(conf->noop){
+		json_ops.tcp_data = json_tcp_data_parser;
+		if(conf->version == JSON_NOOP){
 			json_ops.tcp_data = json_tcp_data_noop;
 		}
-		if(conf->one_record_per_parse){
-			json_ops.tcp_data = json_tcp_data_orpp;
+		if(conf->version == JSON_NEWLINE){
+			json_ops.tcp_data = json_tcp_data_newline;
+		}
+		if(conf->version == JSON_NEWLINE_STRSTR){
+			json_ops.tcp_data = json_tcp_data_newline_strstr;
 		}
 
 		fconf->ops  = &json_ops;
