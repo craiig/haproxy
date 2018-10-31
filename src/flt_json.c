@@ -31,13 +31,13 @@ enum json_version {
 	JSON_PARSER
 	, JSON_NOOP
 	, JSON_NEWLINE
-	, JSON_NEWLINE_STRSTR
+	, JSON_NEWLINE_SIMD
 };
 char* json_version_str[] = {
 	"full json parser (rapidjson)"
 	, "noop"
 	, "newline"
-	, "newline with strstr"
+	, "newline with simd"
 };
 
 struct json_config {
@@ -488,10 +488,12 @@ json_tcp_data_newline(struct stream *s, struct filter *filter, struct channel *c
 	}
 
 	left = ci_contig_data(chn);
-	/*STRM_TRACE(conf, s, "%-25s: channel=%-10s - mode=%-5s (%s) - next=%u - avail=%u",*/
-		   /*__FUNCTION__,*/
-		   /*channel_label(chn), proxy_mode(s), stream_pos(s),*/
-		   /*FLT_NXT(filter, chn), avail);*/
+#ifdef FILTER_TRACE
+	STRM_TRACE(conf, s, "%-25s: channel=%-10s - mode=%-5s (%s) - next=%u - avail=%u",
+		   __FUNCTION__,
+		   channel_label(chn), proxy_mode(s), stream_pos(s),
+		   FLT_NXT(filter, chn), avail);
+#endif
 
 	char *start;
 	int parsed_records = 0;
@@ -524,9 +526,9 @@ json_tcp_data_newline(struct stream *s, struct filter *filter, struct channel *c
 	return ret;
 }
 static int
-json_tcp_data_newline_strstr(struct stream *s, struct filter *filter, struct channel *chn)
+json_tcp_data_newline_simd(struct stream *s, struct filter *filter, struct channel *chn)
 {
-	/* scan for a newline record delimeter using strstr */
+	/* scan for a newline record delimeter using simd */
 	struct json_config *conf = FLT_CONF(filter);
 	int                  avail = ci_data(chn) - FLT_NXT(filter, chn);
 	int                  ret  = avail;
@@ -554,21 +556,21 @@ json_tcp_data_newline_strstr(struct stream *s, struct filter *filter, struct cha
 	JSON_PARSE_TRACE("newline search: start= %p (%d), end= %p (%d) \n", start, *start, end, *end);
 
 	while(start < end){
-		JSON_PARSE_TRACE("strnstrn(start=%p(%d), ..., left=%d)\n", start, *start, left);
-		char* strstr_ret = strnstr(start, "\n", left);
-		if(strstr_ret != NULL){
+		JSON_PARSE_TRACE("memchr(start=%p(%d), ..., left=%d)\n", start, *start, left);
+		char* simd_ret = memchr(start, (int)'\n', left);
+		if(simd_ret != NULL){
 			/* found occurrence */
-			strstr_ret += 1; //move up to the next byte to look at, helps with math below
-			size_t change = (strstr_ret-start);
-			JSON_PARSE_TRACE("found occurrence at: %p (%d)\n", strstr_ret, *strstr_ret);
+			simd_ret += 1; //move up to the next byte to look at, helps with math below
+			size_t change = (simd_ret-start);
+			JSON_PARSE_TRACE("found occurrence at: %p (%d)\n", simd_ret, *simd_ret);
 
 			JSON_PARSE_TRACE("ret += %d\n", change);
 			ret += change;
 			parsed_records ++;
 
 			/* reduce left and move start up */
-			left -= (strstr_ret - start);
-			start = strstr_ret; /* if this goes past end it never gets dereferenced */
+			left -= (simd_ret - start);
+			start = simd_ret; /* if this goes past end it never gets dereferenced */
 		} else {
 			break;
 		}
@@ -585,13 +587,13 @@ json_tcp_data_newline_strstr(struct stream *s, struct filter *filter, struct cha
 		JSON_PARSE_TRACE("newline search wrapped: start= %p (%d), end= %p (%d), left=%d \n", start, *start, end, *end, left);
 
 		while(start != end){
-			JSON_PARSE_TRACE("strnstrn(start=%p(%d), ..., left=%d)\n", start, *start, left);
-			char* strstr_ret = strnstr(start, "\n", left);
-			if(strstr_ret != NULL){
+			JSON_PARSE_TRACE("memchr(start=%p(%d), ..., left=%d)\n", start, *start, left);
+			char* simd_ret = memchr(start, (int)'\n', left);
+			if(simd_ret != NULL){
 				/* found occurrence */
-				strstr_ret += 1; //move up to the next byte to look at, helps with math below
-				size_t change = (strstr_ret-start);
-				JSON_PARSE_TRACE("found occurrence at: %p (%d)\n", strstr_ret, *strstr_ret);
+				simd_ret += 1; //move up to the next byte to look at, helps with math below
+				size_t change = (simd_ret-start);
+				JSON_PARSE_TRACE("found occurrence at: %p (%d)\n", simd_ret, *simd_ret);
 
 				if(unlikely(wrap_remainder)>0){
 					change += wrap_remainder;
@@ -602,8 +604,8 @@ json_tcp_data_newline_strstr(struct stream *s, struct filter *filter, struct cha
 				parsed_records ++;
 
 				/* reduce left and move start up */
-				left -= (strstr_ret - start);
-				start = strstr_ret; /* if this goes past end it never gets dereferenced */
+				left -= (simd_ret - start);
+				start = simd_ret; /* if this goes past end it never gets dereferenced */
 			} else {
 				break;
 			}
@@ -732,8 +734,8 @@ parse_json_flt(char **args, int *cur_arg, struct proxy *px,
 				conf->version = JSON_NOOP;
 			} else if (!strcmp(args[pos], "newline")) {
 				conf->version = JSON_NEWLINE;
-			} else if (!strcmp(args[pos], "newlinestrstr")) {
-				conf->version = JSON_NEWLINE_STRSTR;
+			} else if (!strcmp(args[pos], "newlinesimd")) {
+				conf->version = JSON_NEWLINE_SIMD;
 			} else {
 				break;
 			}
@@ -748,8 +750,8 @@ parse_json_flt(char **args, int *cur_arg, struct proxy *px,
 		if(conf->version == JSON_NEWLINE){
 			json_ops.tcp_data = json_tcp_data_newline;
 		}
-		if(conf->version == JSON_NEWLINE_STRSTR){
-			json_ops.tcp_data = json_tcp_data_newline_strstr;
+		if(conf->version == JSON_NEWLINE_SIMD){
+			json_ops.tcp_data = json_tcp_data_newline_simd;
 		}
 
 		fconf->ops  = &json_ops;

@@ -3,14 +3,14 @@ all: test
 # expectation is COPTS is set by the caller makefile
 COPTS ?= -O0 -g
 
-jsonwrapper.o: jsonwrapper.cpp jsonwrapper.h
+jsonwrapper.o: jsonwrapper.cpp jsonwrapper.h rapidjson/
 	gcc $(COPTS) jsonwrapper.cpp -c -o $@ -I./rapidjson/include
 
 test: jsonwrapper_test
 jsonwrapper_test: jsonwrapper.cpp jsonwrapper.h rapidjson/
-	gcc $(COPTS) -DTESTING jsonwrapper.cpp -o $@ -lc++ -I./rapidjson/include
+	g++ $(COPTS) -DTESTING jsonwrapper.cpp -o $@ -I./rapidjson/include
 
-rapidjson:
+rapidjson/:
 	git clone https://github.com/Tencent/rapidjson
 
 clean:

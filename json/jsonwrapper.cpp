@@ -116,31 +116,34 @@ struct WrappedMemoryStream {
     size_t count_;       //!< Size of the stream.
 };
 //! Specialized for UTF8 WrappedMemoryStream.
-template <>
-class EncodedInputStream<UTF8<>, WrappedMemoryStream> {
-public:
-    typedef UTF8<>::Ch Ch;
+/* namespace wrapped needed for gcc */
+namespace rapidjson {
+	template <>
+		class EncodedInputStream<UTF8<>, WrappedMemoryStream> {
+			public:
+				typedef UTF8<>::Ch Ch;
 
-    EncodedInputStream(WrappedMemoryStream& is) : is_(is) {
-        if (static_cast<unsigned char>(is_.Peek()) == 0xEFu) is_.Take();
-        if (static_cast<unsigned char>(is_.Peek()) == 0xBBu) is_.Take();
-        if (static_cast<unsigned char>(is_.Peek()) == 0xBFu) is_.Take();
-    }
-    Ch Peek() const { return is_.Peek(); }
-    Ch Take() { return is_.Take(); }
-    size_t Tell() const { return is_.Tell(); }
+				EncodedInputStream(WrappedMemoryStream& is) : is_(is) {
+					if (static_cast<unsigned char>(is_.Peek()) == 0xEFu) is_.Take();
+					if (static_cast<unsigned char>(is_.Peek()) == 0xBBu) is_.Take();
+					if (static_cast<unsigned char>(is_.Peek()) == 0xBFu) is_.Take();
+				}
+				Ch Peek() const { return is_.Peek(); }
+				Ch Take() { return is_.Take(); }
+				size_t Tell() const { return is_.Tell(); }
 
-    // Not implemented
-    void Put(Ch) {}
-    void Flush() {} 
-    Ch* PutBegin() { return 0; }
-    size_t PutEnd(Ch*) { return 0; }
+				// Not implemented
+				void Put(Ch) {}
+				void Flush() {} 
+				Ch* PutBegin() { return 0; }
+				size_t PutEnd(Ch*) { return 0; }
 
-    WrappedMemoryStream& is_;
+				WrappedMemoryStream& is_;
 
-private:
-    EncodedInputStream(const EncodedInputStream&);
-    EncodedInputStream& operator=(const EncodedInputStream&);
+			private:
+				EncodedInputStream(const EncodedInputStream&);
+				EncodedInputStream& operator=(const EncodedInputStream&);
+		};
 };
 
 /* parser interface that supports wrapping buffers from haproxy.

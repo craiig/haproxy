@@ -140,7 +140,8 @@ ARCH =
 #### Toolchain options.
 # GCC is normally used both for compiling and linking.
 CC = gcc
-LD = $(CC)
+# g++ needed to link in json
+LD = g++ 
 
 #### Debug flags (typically "-g").
 # Those flags only feed CFLAGS so it is not mandatory to use this form.
@@ -248,7 +249,7 @@ CFLAGS = $(ARCH_FLAGS) $(CPU_CFLAGS) $(DEBUG_CFLAGS) $(SPEC_CFLAGS)
 # These LDFLAGS are used as the first "ld" options, regardless of any library
 # path or any other option. They may be changed to add any linker-specific
 # option at the beginning of the ld command line.
-LDFLAGS = $(ARCH_FLAGS) -g -lc++
+LDFLAGS = $(ARCH_FLAGS) -g
 
 #### Target system options
 # Depending on the target platform, some options are set, as well as some
